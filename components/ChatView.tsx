@@ -39,6 +39,9 @@ function ChatMessage({ message }: { message: Message }) {
       <div className="rounded-[12px_12px_12px_2px] bg-pending px-4 py-3 break-words whitespace-pre-line">
         {message.text}
       </div>
+      {message.detail && (
+        <span className="font-mono text-[11px] break-all text-error-ink">{message.detail}</span>
+      )}
       {message.sources.length > 0 ? (
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-semibold tracking-[0.06em] text-muted uppercase">

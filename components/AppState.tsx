@@ -41,7 +41,14 @@ type LocalRow = Omit<FileRow, "file">;
 export type Message =
   | { id: number; role: "user"; text: string }
   | { id: number; role: "thinking" }
-  | { id: number; role: "bot"; text: string; sources: Source[]; isNotice: boolean };
+  | {
+      id: number;
+      role: "bot";
+      text: string;
+      sources: Source[];
+      isNotice: boolean;
+      detail?: string; // technical reason for an error, shown for diagnosis
+    };
 
 export const NO_READY_FILES_REPLY =
   "There are no ready files to search yet. Upload one on the Documents page first.";
@@ -238,14 +245,16 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         if (res.status === 409) {
           reply = { id: botId, role: "bot", text: NO_READY_FILES_REPLY, sources: [], isNotice: true };
         } else if (!res.ok) {
-          throw new Error(`chat status ${res.status}`);
+          const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+          throw new Error(`${body.error ?? `status ${res.status}`}${body.detail ? `: ${body.detail}` : ""}`);
         } else {
           const data = (await res.json()) as ChatResponse;
           interactionId.current = data.interactionId;
           reply = { id: botId, role: "bot", text: data.answer, sources: data.sources, isNotice: false };
         }
-      } catch {
-        reply = { id: botId, role: "bot", text: CHAT_ERROR_REPLY, sources: [], isNotice: true };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        reply = { id: botId, role: "bot", text: CHAT_ERROR_REPLY, sources: [], isNotice: true, detail };
       }
       setMessages((prev) => prev.map((m) => (m.id === botId ? reply : m)));
       setInFlight(false);
