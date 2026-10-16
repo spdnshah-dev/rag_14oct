@@ -1,6 +1,6 @@
 "use client";
 
-import { upload } from "@vercel/blob/client";
+import { uploadPresigned } from "@vercel/blob/client";
 import {
   createContext,
   useCallback,
@@ -127,7 +127,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       ]);
 
       try {
-        const blob = await upload(`uploads/${key}.${extension}`, file, {
+        const blob = await uploadPresigned(`uploads/${key}.${extension}`, file, {
           access: BLOB_ACCESS,
           handleUploadUrl: "/api/blob/upload",
           contentType: MIME_BY_EXTENSION[extension],

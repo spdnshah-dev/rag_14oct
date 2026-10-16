@@ -13,8 +13,9 @@ This is an open app: there is no login. Anyone with the URL can upload, ask, and
 
 1. Vercel dashboard → **Add New → Project** → import this GitHub repo. Framework preset:
    Next.js. Leave build settings at their defaults.
-2. In the project → **Storage** → create a **Blob** store and connect it to the project. This
-   adds `BLOB_READ_WRITE_TOKEN` automatically. Choose **Private** access if offered. If you
+2. In the project → **Storage** → create a **Blob** store and connect it to the project. Vercel
+   adds the store's credentials automatically: `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY` on
+   newer projects, `BLOB_READ_WRITE_TOKEN` on older ones. The app works with either. Choose **Private** access if offered. If you
    choose Public, also add `NEXT_PUBLIC_BLOB_ACCESS=public` in step 3.
 3. **Settings → Environment Variables** → add `GEMINI_API_KEY` (from Google AI Studio) for
    Production and Preview.
@@ -24,12 +25,14 @@ This is an open app: there is no login. Anyone with the URL can upload, ask, and
 
 ## Environment variables
 
-See `.env.example`. Only `GEMINI_API_KEY` and `BLOB_READ_WRITE_TOKEN` are required.
+See `.env.example`. Required: `GEMINI_API_KEY`, plus the Blob store credentials Vercel adds
+when the store is connected.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | yes | Server only |
-| `BLOB_READ_WRITE_TOKEN` | yes | Added by Vercel when a Blob store is connected |
+| `BLOB_STORE_ID` + `BLOB_WEBHOOK_PUBLIC_KEY` | yes* | Added by Vercel when a Blob store is connected; auth uses Vercel's OIDC token |
+| `BLOB_READ_WRITE_TOKEN` | yes* | Older alternative to `BLOB_STORE_ID`; also needed for local testing |
 | `GEMINI_MODEL` | no | Defaults to `gemini-3.8-flash`; must support File Search |
 | `GEMINI_FILE_SEARCH_STORE` | no | Pins a store; otherwise the app finds or creates `document-qa-app` |
 | `NEXT_PUBLIC_BLOB_ACCESS` | no | `private` (default) or `public`; must match the Blob store |
