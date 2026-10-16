@@ -1,5 +1,5 @@
 import { isUuid } from "@/lib/files";
-import { findStoreName, gemini, listFiles, logError, modelName } from "@/lib/gemini";
+import { findStoreName, gemini, listFiles, logError, modelName, withRetry } from "@/lib/gemini";
 import { readAnswer, type InteractionLike } from "@/lib/sources";
 import type { ChatResponse } from "@/lib/types";
 
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "no_ready_files" }, { status: 409 });
     }
 
-    const interaction = await gemini().interactions.create({
+    const interaction = await withRetry(() => gemini().interactions.create({
       model: modelName(),
       input: question,
       system_instruction: SYSTEM_INSTRUCTION,
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
         },
       ],
       previous_interaction_id: previousInteractionId,
-    });
+    }));
 
     if (interaction.status === "failed" || interaction.errors?.length) {
       logError("chat", new Error(`interaction status=${interaction.status}`));
