@@ -32,6 +32,7 @@ export type FileRow = {
   sizeBytes: number;
   stage: RowStage;
   error?: string;
+  detail?: string; // technical reason, shown under the error for diagnosis
   file?: FileItem; // set for files stored in Gemini
 };
 
@@ -46,6 +47,7 @@ export const NO_READY_FILES_REPLY =
   "There are no ready files to search yet. Upload one on the Documents page first.";
 export const CHAT_ERROR_REPLY = "Something went wrong getting an answer. Please try again.";
 const REMOVE_ERROR = "Couldn't remove the file. Please try again.";
+const UPLOAD_FAILED_MESSAGE = "Upload failed. Please try again.";
 
 type AppState = {
   rows: FileRow[];
@@ -126,14 +128,25 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         ...rows,
       ]);
 
+      let blob;
       try {
-        const blob = await uploadPresigned(`uploads/${key}.${extension}`, file, {
+        blob = await uploadPresigned(`uploads/${key}.${extension}`, file, {
           access: BLOB_ACCESS,
           handleUploadUrl: "/api/blob/upload",
           contentType: MIME_BY_EXTENSION[extension],
         });
-        patchLocalRow(key, { stage: "processing" });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        patchLocalRow(key, {
+          stage: "error",
+          error: UPLOAD_FAILED_MESSAGE,
+          detail: `Upload to storage failed: ${reason}`,
+        });
+        return;
+      }
+      patchLocalRow(key, { stage: "processing" });
 
+      try {
         const res = await fetch("/api/files/ingest", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -145,7 +158,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             replaceDocumentName: existing?.documentName,
           }),
         });
-        if (!res.ok) throw new Error(`ingest status ${res.status}`);
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+          throw new Error(`${body.error ?? `status ${res.status}`}${body.detail ? `: ${body.detail}` : ""}`);
+        }
         const { file: stored } = (await res.json()) as { file: FileItem };
 
         setFiles((prev) => [
@@ -156,8 +172,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         ]);
         setLocalRows((rows) => rows.filter((r) => r.key !== key));
         if (existing && scope === existing.appFileId) setScope("all");
-      } catch {
-        patchLocalRow(key, { stage: "error", error: PROCESSING_FAILED_MESSAGE });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        patchLocalRow(key, {
+          stage: "error",
+          error: PROCESSING_FAILED_MESSAGE,
+          detail: `Processing step failed: ${reason}`,
+        });
       }
     },
     [files, scope, setScope],

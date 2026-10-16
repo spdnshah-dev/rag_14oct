@@ -52,8 +52,9 @@ export function FileRowItem({ row, onRemove }: { row: FileRow; onRemove: () => v
         </span>
       </div>
       {row.stage === "error" ? (
-        <span role="alert" className="flex-[1_1_300px] rounded-lg bg-error px-3 py-1.5 text-[13px] text-error-ink">
-          {row.error}
+        <span role="alert" className="flex flex-[1_1_300px] flex-col gap-1 rounded-lg bg-error px-3 py-1.5 text-[13px] text-error-ink">
+          <span>{row.error}</span>
+          {row.detail && <span className="font-mono text-[11px] break-all opacity-80">{row.detail}</span>}
         </span>
       ) : (
         <StepPills stage={row.stage} />

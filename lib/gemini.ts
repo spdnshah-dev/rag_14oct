@@ -93,9 +93,15 @@ export function errorStatus(error: unknown): number | undefined {
   return error instanceof ApiError ? error.status : undefined;
 }
 
-// Logs an error without request content or secrets.
-export function logError(context: string, error: unknown) {
+// A short error description that is safe to log or show: API keys are masked.
+export function describeError(error: unknown, maxLength = 300): string {
   const status = errorStatus(error);
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`[${context}]${status ? ` status=${status}` : ""} ${message.slice(0, 500)}`);
+  const masked = message.replace(/AIza[0-9A-Za-z_-]+/g, "[key]").replace(/key=[^&\s"]+/gi, "key=[key]");
+  return `${status ? `status=${status} ` : ""}${masked}`.slice(0, maxLength);
+}
+
+// Logs an error without request content or secrets.
+export function logError(context: string, error: unknown) {
+  console.error(`[${context}] ${describeError(error, 500)}`);
 }

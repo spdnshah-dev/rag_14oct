@@ -8,6 +8,7 @@ import {
   isUuid,
 } from "@/lib/files";
 import {
+  describeError,
   gemini,
   getOrCreateStoreName,
   isDocumentOfStore,
@@ -43,7 +44,9 @@ function isBlobUrl(value: unknown): value is string {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const processingFailed = () => Response.json({ error: "processing_failed" }, { status: 422 });
+// "detail" names the failing step so problems can be diagnosed from the UI.
+const processingFailed = (detail: string) =>
+  Response.json({ error: "processing_failed", detail }, { status: 422 });
 
 export async function POST(request: Request) {
   const deadline = Date.now() + maxDuration * 1000 - SAFETY_MARGIN_MS;
@@ -74,7 +77,7 @@ export async function POST(request: Request) {
     }
 
     const blob = await get(blobUrl, { access: BLOB_ACCESS, useCache: false });
-    if (!blob || blob.statusCode !== 200) return processingFailed();
+    if (!blob || blob.statusCode !== 200) return processingFailed("Could not read the uploaded file from Blob storage");
     const bytes = await new Response(blob.stream).arrayBuffer();
     if (bytes.byteLength > MAX_FILE_BYTES) {
       return Response.json({ error: "bad_type_or_size" }, { status: 400 });
@@ -87,7 +90,7 @@ export async function POST(request: Request) {
       file: new Blob([bytes], { type: mimeType }),
       config: { displayName: fileName, mimeType },
     });
-    if (!uploaded.name) return processingFailed();
+    if (!uploaded.name) return processingFailed("Gemini file upload returned no name");
 
     let operation = await ai.fileSearchStores.importFile({
       fileSearchStoreName: storeName,
@@ -109,15 +112,16 @@ export async function POST(request: Request) {
       operation = await ai.operations.get({ operation });
     }
     if (operation.error) {
-      logError("ingest-import", new Error(JSON.stringify(operation.error).slice(0, 300)));
-      return processingFailed();
+      const importError = new Error(`Gemini import failed: ${JSON.stringify(operation.error)}`);
+      logError("ingest-import", importError);
+      return processingFailed(describeError(importError));
     }
 
     const documentName = operation.response?.documentName;
-    if (!documentName) return processingFailed();
+    if (!documentName) return processingFailed("Gemini import returned no document");
     const document = await ai.fileSearchStores.documents.get({ name: documentName });
     const file = toFileItem(document, false);
-    if (!file) return processingFailed();
+    if (!file) return processingFailed(`Gemini document not usable (state ${document.state ?? "unknown"})`);
 
     if (replaceDocumentName && isDocumentOfStore(replaceDocumentName, storeName)) {
       try {
@@ -133,7 +137,7 @@ export async function POST(request: Request) {
     return Response.json({ file });
   } catch (error) {
     logError("ingest", error);
-    return processingFailed();
+    return processingFailed(describeError(error));
   } finally {
     await del(blobUrl).catch((error) => logError("ingest-blob-delete", error));
   }

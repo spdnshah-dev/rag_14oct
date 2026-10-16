@@ -1,7 +1,7 @@
 import { handleUploadPresigned, type HandleUploadPresignedBody } from "@vercel/blob/client";
 import { issueSignedToken } from "@vercel/blob";
 import { ALLOWED_MIME_TYPES, MAX_FILE_BYTES, getExtension } from "@/lib/files";
-import { logError } from "@/lib/gemini";
+import { describeError, logError } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 
@@ -50,6 +50,6 @@ export async function POST(request: Request) {
     return Response.json(result);
   } catch (error) {
     logError("blob-upload", error);
-    return Response.json({ error: "upload_rejected" }, { status: 400 });
+    return Response.json({ error: "upload_rejected", detail: describeError(error) }, { status: 400 });
   }
 }
