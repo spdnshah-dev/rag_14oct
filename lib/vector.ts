@@ -1,5 +1,5 @@
 import "server-only";
-import { Index } from "@upstash/vector";
+import { Index, WeightingStrategy } from "@upstash/vector";
 import type { Chunk } from "./chunk";
 import { sleep } from "./errors";
 import { getExtension } from "./files";
@@ -132,6 +132,16 @@ export async function deleteChunks(appFileId: string) {
   await vectorIndex().delete({ prefix: `${appFileId}:` }, { namespace: CHUNKS });
 }
 
+// Upstash recommends IDF weighting (rarer words count more) for BM25.
+let usesBm25: boolean | null = null;
+async function sparseIsBm25(): Promise<boolean> {
+  if (usesBm25 === null) {
+    const info = await vectorIndex().info();
+    usesBm25 = /bm25/i.test(info.sparseIndex?.embeddingModel ?? "");
+  }
+  return usesBm25;
+}
+
 // Hybrid (meaning + keyword) search when the index has both models;
 // otherwise whatever the index supports. appFileId must be a validated UUID.
 export async function searchPassages(
@@ -145,6 +155,7 @@ export async function searchPassages(
       topK,
       includeMetadata: true,
       includeData: true,
+      ...((await sparseIsBm25()) ? { weightingStrategy: WeightingStrategy.IDF } : {}),
       ...(appFileId ? { filter: `appFileId = '${appFileId}'` } : {}),
     },
     { namespace: CHUNKS },
