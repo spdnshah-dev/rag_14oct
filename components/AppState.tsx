@@ -19,7 +19,7 @@ import {
   getExtension,
   problemMessage,
 } from "@/lib/files";
-import type { ChatResponse, FileItem, Source } from "@/lib/types";
+import type { ChatResponse, ChatTurn, FileItem, Source } from "@/lib/types";
 
 // State lives in the root layout, so it survives switching between
 // Documents and Chat. It is lost on a page reload by design.
@@ -33,7 +33,7 @@ export type FileRow = {
   stage: RowStage;
   error?: string;
   detail?: string; // technical reason, shown under the error for diagnosis
-  file?: FileItem; // set for files stored in Gemini
+  file?: FileItem; // set for files that are indexed and searchable
 };
 
 type LocalRow = Omit<FileRow, "file">;
@@ -55,6 +55,10 @@ export const NO_READY_FILES_REPLY =
 export const CHAT_ERROR_REPLY = "Something went wrong getting an answer. Please try again.";
 const REMOVE_ERROR = "Couldn't remove the file. Please try again.";
 const UPLOAD_FAILED_MESSAGE = "Upload failed. Please try again.";
+const TOO_MUCH_TEXT_MESSAGE =
+  "This file has too much text to index. Split it into smaller files, then try again.";
+const TIMEOUT_MESSAGE = "Processing took too long. Please try again.";
+const GENERIC_PROCESSING_MESSAGE = "Processing failed. Please try again.";
 
 type AppState = {
   rows: FileRow[];
@@ -84,7 +88,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inFlight, setInFlight] = useState(false);
   const [selectedScope, setScopeState] = useState("all");
-  const interactionId = useRef<string | null>(null);
+  // Earlier exchanges in this scope, sent with follow-up questions.
+  const history = useRef<ChatTurn[]>([]);
   const nextMessageId = useRef(1);
   // Falls back to all files if the chosen file was removed or replaced.
   const scope =
@@ -108,7 +113,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   // A new scope starts a new conversation, so answers from other files do not leak in.
   const setScope = useCallback((next: string) => {
     setScopeState(next);
-    interactionId.current = null;
+    history.current = [];
   }, []);
 
   const patchLocalRow = (key: string, patch: Partial<LocalRow>) =>
@@ -162,19 +167,35 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             fileName: file.name,
             sizeBytes: file.size,
             appFileId: key,
-            replaceDocumentName: existing?.documentName,
+            replaceAppFileId: existing?.appFileId,
           }),
         });
         if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
-          throw new Error(`${body.error ?? `status ${res.status}`}${body.detail ? `: ${body.detail}` : ""}`);
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            reason?: string;
+            detail?: string;
+          };
+          patchLocalRow(key, {
+            stage: "error",
+            error:
+              body.reason === "no_text"
+                ? PROCESSING_FAILED_MESSAGE
+                : body.reason === "too_much_text"
+                  ? TOO_MUCH_TEXT_MESSAGE
+                  : body.error === "timeout"
+                    ? TIMEOUT_MESSAGE
+                    : GENERIC_PROCESSING_MESSAGE,
+            detail: `Processing step failed: ${body.error ?? `status ${res.status}`}${body.detail ? `: ${body.detail}` : ""}`,
+          });
+          return;
         }
         const { file: stored } = (await res.json()) as { file: FileItem };
 
         setFiles((prev) => [
           stored,
           ...prev.filter(
-            (f) => f.documentName !== existing?.documentName && f.documentName !== stored.documentName,
+            (f) => f.appFileId !== existing?.appFileId && f.appFileId !== stored.appFileId,
           ),
         ]);
         setLocalRows((rows) => rows.filter((r) => r.key !== key));
@@ -183,7 +204,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         const reason = error instanceof Error ? error.message : String(error);
         patchLocalRow(key, {
           stage: "error",
-          error: PROCESSING_FAILED_MESSAGE,
+          error: GENERIC_PROCESSING_MESSAGE,
           detail: `Processing step failed: ${reason}`,
         });
       }
@@ -198,15 +219,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         setLocalRows((rows) => rows.filter((r) => r.key !== row.key));
         return;
       }
-      const { documentName, appFileId } = row.file;
-      const res = await fetch(`/api/files/${encodeURIComponent(documentName)}`, {
+      const { appFileId } = row.file;
+      const res = await fetch(`/api/files/${encodeURIComponent(appFileId)}`, {
         method: "DELETE",
       }).catch(() => null);
       if (!res || (!res.ok && res.status !== 404)) {
         window.alert(REMOVE_ERROR);
         return;
       }
-      setFiles((prev) => prev.filter((f) => f.documentName !== documentName));
+      setFiles((prev) => prev.filter((f) => f.appFileId !== appFileId));
       if (scope === appFileId) setScope("all");
     },
     [scope, setScope],
@@ -239,7 +260,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           body: JSON.stringify({
             question,
             scope,
-            previousInteractionId: interactionId.current ?? undefined,
+            history: history.current,
           }),
         });
         if (res.status === 409) {
@@ -249,7 +270,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           throw new Error(`${body.error ?? `status ${res.status}`}${body.detail ? `: ${body.detail}` : ""}`);
         } else {
           const data = (await res.json()) as ChatResponse;
-          interactionId.current = data.interactionId;
+          history.current = [...history.current, { question, answer: data.answer }].slice(-3);
           reply = { id: botId, role: "bot", text: data.answer, sources: data.sources, isNotice: false };
         }
       } catch (error) {
@@ -266,7 +287,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     () => [
       ...localRows,
       ...files.map((f) => ({
-        key: f.documentName,
+        key: f.appFileId,
         name: f.name,
         sizeBytes: f.sizeBytes,
         stage: "ready" as const,

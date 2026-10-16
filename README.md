@@ -3,57 +3,69 @@
 Upload PDF, TXT, Markdown or Word (.docx) files, then ask questions that are answered only
 from those files, with the source file and page shown under every answer.
 
-Gemini's File Search tool does the chunking, embedding, storage and retrieval. Files go
-browser → Vercel Blob (temporary) → server → Gemini, because Vercel functions reject request
-bodies over 4.5 MB. The Gemini API key is only read on the server.
+## How it works
 
-This is an open app: there is no login. Anyone with the URL can upload, ask, and remove files.
+- **Upload:** browser → Vercel Blob (temporary, because Vercel functions reject request bodies
+  over 4.5 MB) → server.
+- **Indexing:** the server reads the text (PDF page by page, so answers can cite pages), splits
+  it into overlapping passages of about 1,200 characters, and stores them in an
+  **Upstash Vector** index. The index creates the embeddings itself with its built-in model.
+  A hybrid index (dense + sparse/BM25) matches both meaning and exact words, names and numbers.
+  The file appears as Ready only after all its passages are searchable.
+- **Answering:** the server finds the 8 best-matching passages and sends them, numbered, to a
+  **Groq** model, which answers only from them and cites passage numbers. Those citations
+  become the sources shown under the answer. Follow-up questions send the last 3 exchanges.
+
+API keys are only read on the server. This is an open app: there is no login. Anyone with the
+URL can upload, ask, and remove files.
 
 ## Deploy on Vercel (one time)
 
 1. Vercel dashboard → **Add New → Project** → import this GitHub repo. Framework preset:
    Next.js. Leave build settings at their defaults.
-2. In the project → **Storage** → create a **Blob** store and connect it to the project. Vercel
-   adds the store's credentials automatically: `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY` on
-   newer projects, `BLOB_READ_WRITE_TOKEN` on older ones. The app works with either. Choose **Private** access if offered. If you
-   choose Public, also add `NEXT_PUBLIC_BLOB_ACCESS=public` in step 3.
-3. **Settings → Environment Variables** → add `GEMINI_API_KEY` (from Google AI Studio) for
-   Production and Preview.
-4. **Deployments → Redeploy** so the variables load.
-5. Open `<your-url>/api/health`. Expect `{"ok":true,"store":false,"model":"gemini-3.8-flash"}`.
-   `store` turns `true` after the first upload, which creates the Gemini File Search store.
+2. **Storage** → create a **Blob** store and connect it to the project. Vercel adds the
+   store's credentials automatically: `BLOB_STORE_ID` and `BLOB_WEBHOOK_PUBLIC_KEY` on newer
+   projects, `BLOB_READ_WRITE_TOKEN` on older ones. The app works with either. Choose
+   **Private** access if offered. If you choose Public, also add
+   `NEXT_PUBLIC_BLOB_ACCESS=public`.
+3. **Storage** → create an **Upstash Vector** index and connect it to the project. Choose an
+   Upstash-hosted **embedding model** (recommended: hybrid, dense `BGE-M3` + sparse `BM25`).
+   This adds `UPSTASH_VECTOR_REST_URL` and `UPSTASH_VECTOR_REST_TOKEN`.
+4. **Settings → Environment Variables** → add `GROQ_API_KEY` for Production and Preview.
+5. **Deployments → Redeploy** so the variables load.
+6. Open `<your-url>/api/health`. Expect `"ok":true` and the index's embedding models under
+   `search`. Any problem is listed under `errors` by service.
 
 ## Environment variables
 
-See `.env.example`. Required: `GEMINI_API_KEY`, plus the Blob store credentials Vercel adds
-when the store is connected.
+See `.env.example`.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | yes | Server only |
+| `GROQ_API_KEY` | yes | Server only |
+| `GROQ_MODEL` | no | Defaults to `openai/gpt-oss-120b` |
+| `UPSTASH_VECTOR_REST_URL` + `UPSTASH_VECTOR_REST_TOKEN` | yes | Added by Vercel when the index is connected |
 | `BLOB_STORE_ID` + `BLOB_WEBHOOK_PUBLIC_KEY` | yes* | Added by Vercel when a Blob store is connected; auth uses Vercel's OIDC token |
 | `BLOB_READ_WRITE_TOKEN` | yes* | Older alternative to `BLOB_STORE_ID`; also needed for local testing |
-| `GEMINI_MODEL` | no | Defaults to `gemini-3.8-flash`; must support File Search |
-| `GEMINI_FILE_SEARCH_STORE` | no | Pins a store; otherwise the app finds or creates `document-qa-app` |
 | `NEXT_PUBLIC_BLOB_ACCESS` | no | `private` (default) or `public`; must match the Blob store |
 | `NEXT_PUBLIC_APP_NAME` | no | Defaults to "Document Q&A" |
 
 ## Run locally
 
 ```bash
-cp .env.example .env.local   # then fill in GEMINI_API_KEY and BLOB_READ_WRITE_TOKEN
+cp .env.example .env.local   # then fill in the keys above
 npm install
 npm run dev
 ```
 
-Local and deployed copies share the same Gemini store when they use the same API key.
+Local and deployed copies share the same files when they use the same Upstash index.
 
 ## Known limits
 
-- Hobby plan functions stop after 300 seconds. If a large file's processing takes longer, the
-  row shows Failed, but Gemini may still finish the import; the file then appears after a
-  reload.
+- Scanned PDFs (photos of pages) have no text layer, so they show a Failed message.
+- A file can produce at most 3,000 passages (about 3.6 million characters of text).
+- Upstash and Groq free tiers have daily and per-minute limits. When a limit is hit, the
+  error is shown under the failed row or answer.
+- Hobby plan functions stop after 300 seconds; very large files may time out while indexing.
 - If the tab is closed after the browser upload but before processing starts, the temporary
   blob is not deleted. Delete it by hand in Vercel → Storage → Blob.
-- Gemini free tier: Google may use submitted content to improve its products, and total
-  storage is capped at 1 GB (stored size is about 3× the file size).

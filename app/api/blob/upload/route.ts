@@ -1,7 +1,7 @@
 import { handleUploadPresigned, type HandleUploadPresignedBody } from "@vercel/blob/client";
 import { issueSignedToken } from "@vercel/blob";
 import { ALLOWED_MIME_TYPES, MAX_FILE_BYTES, getExtension } from "@/lib/files";
-import { describeError, logError } from "@/lib/gemini";
+import { describeError, logError } from "@/lib/errors";
 
 export const runtime = "nodejs";
 

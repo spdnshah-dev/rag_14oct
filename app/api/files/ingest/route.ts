@@ -1,41 +1,32 @@
 import { del, get } from "@vercel/blob";
+import { chunkPages } from "@/lib/chunk";
+import { describeError, logError, step } from "@/lib/errors";
+import { extractPages, hasReadableText } from "@/lib/extract";
+import { BLOB_ACCESS, MAX_FILE_BYTES, checkFile, getExtension, isUuid } from "@/lib/files";
+import type { FileItem } from "@/lib/types";
 import {
-  BLOB_ACCESS,
-  MAX_FILE_BYTES,
-  MIME_BY_EXTENSION,
-  checkFile,
-  getExtension,
-  isUuid,
-} from "@/lib/files";
-import type { Document } from "@google/genai";
-import {
-  describeError,
-  errorStatus,
-  findDocumentByAppFileId,
-  gemini,
-  getOrCreateStoreName,
-  isDocumentOfStore,
-  logError,
-  sleep,
-  step,
-  toFileItem,
-  withRetry,
-} from "@/lib/gemini";
+  deleteChunks,
+  deleteFile,
+  saveFileRecord,
+  upsertChunks,
+  waitForIndexing,
+} from "@/lib/vector";
 
 export const runtime = "nodejs";
 // Highest limit on the Vercel Hobby plan.
 export const maxDuration = 300;
 
-const POLL_INTERVAL_MS = 4000;
 // Leave time to clean up before Vercel stops the function.
 const SAFETY_MARGIN_MS = 20_000;
+// Guards the free-tier index limits; about 3.6 million characters of text.
+const MAX_CHUNKS_PER_FILE = 3000;
 
 type IngestBody = {
   blobUrl?: unknown;
   fileName?: unknown;
   sizeBytes?: unknown;
   appFileId?: unknown;
-  replaceDocumentName?: unknown;
+  replaceAppFileId?: unknown;
 };
 
 function isBlobUrl(value: unknown): value is string {
@@ -48,9 +39,9 @@ function isBlobUrl(value: unknown): value is string {
   }
 }
 
-// "detail" names the failing step so problems can be diagnosed from the UI.
-const processingFailed = (detail: string) =>
-  Response.json({ error: "processing_failed", detail }, { status: 422 });
+// "reason" is shown to the user; "detail" names the failing step for diagnosis.
+const processingFailed = (detail: string, reason?: "no_text" | "too_much_text") =>
+  Response.json({ error: "processing_failed", reason, detail }, { status: 422 });
 
 export async function POST(request: Request) {
   const deadline = Date.now() + maxDuration * 1000 - SAFETY_MARGIN_MS;
@@ -61,17 +52,19 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
-  const { blobUrl, fileName, sizeBytes, appFileId, replaceDocumentName } = body;
+  const { blobUrl, fileName, sizeBytes, appFileId, replaceAppFileId } = body;
   if (!isBlobUrl(blobUrl)) {
     return Response.json({ error: "bad_request" }, { status: 400 });
   }
 
+  let chunksWritten = false;
+  let succeeded = false;
   try {
     if (
       typeof fileName !== "string" ||
       typeof sizeBytes !== "number" ||
       !isUuid(appFileId) ||
-      (replaceDocumentName !== undefined && typeof replaceDocumentName !== "string")
+      (replaceAppFileId !== undefined && !isUuid(replaceAppFileId))
     ) {
       return Response.json({ error: "bad_request" }, { status: 400 });
     }
@@ -80,98 +73,52 @@ export async function POST(request: Request) {
       return Response.json({ error: "bad_type_or_size" }, { status: 400 });
     }
 
-    const blob = await get(blobUrl, { access: BLOB_ACCESS, useCache: false });
-    if (!blob || blob.statusCode !== 200) return processingFailed("Could not read the uploaded file from Blob storage");
+    const blob = await step("Read upload from Blob storage", () =>
+      get(blobUrl, { access: BLOB_ACCESS, useCache: false }),
+    );
+    if (!blob || blob.statusCode !== 200) {
+      return processingFailed("Could not read the uploaded file from Blob storage");
+    }
     const bytes = await new Response(blob.stream).arrayBuffer();
     if (bytes.byteLength > MAX_FILE_BYTES) {
       return Response.json({ error: "bad_type_or_size" }, { status: 400 });
     }
 
-    const ai = gemini();
-    const storeName = await step("Find or create Gemini store", getOrCreateStoreName);
-    const mimeType = MIME_BY_EXTENSION[extension];
-    const uploaded = await step("Gemini file upload", () =>
-      withRetry(() =>
-        ai.files.upload({
-          file: new Blob([bytes], { type: mimeType }),
-          config: { displayName: fileName, mimeType },
-        }),
-      ),
-    );
-    if (!uploaded.name) return processingFailed("Gemini file upload returned no name");
-
-    let operation = await step("Gemini import", () =>
-      withRetry(() =>
-        ai.fileSearchStores.importFile({
-          fileSearchStoreName: storeName,
-          fileName: uploaded.name!,
-          config: {
-            customMetadata: [
-              { key: "app_file_id", stringValue: appFileId },
-              { key: "original_name", stringValue: fileName },
-              { key: "size_bytes", numericValue: bytes.byteLength },
-              { key: "uploaded_at", numericValue: Math.floor(Date.now() / 1000) },
-            ],
-          },
-        }),
-      ),
-    );
-
-    // Wait for processing. If the operation status cannot be read, watch the
-    // store for our document instead.
-    let document: Document | null = null;
-    let watchStore = false;
-    while (!operation.done) {
-      if (Date.now() + POLL_INTERVAL_MS > deadline) {
-        return Response.json({ error: "timeout" }, { status: 504 });
-      }
-      await sleep(POLL_INTERVAL_MS);
-      if (!watchStore) {
-        try {
-          operation = await withRetry(() => ai.operations.get({ operation }));
-        } catch (error) {
-          if (errorStatus(error) !== 404) throw new Error(`Import status check: ${describeError(error)}`);
-          logError("ingest-poll", error);
-          watchStore = true;
-        }
-      }
-      if (watchStore) {
-        document = await step("Find imported document", () =>
-          findDocumentByAppFileId(storeName, appFileId),
-        );
-        if (document && document.state !== "STATE_PENDING") break;
-      }
-    }
-    if (operation.error) {
-      const importError = new Error(`Gemini import failed: ${JSON.stringify(operation.error)}`);
-      logError("ingest-import", importError);
-      return processingFailed(describeError(importError));
+    const pages = await step("Read text from file", () => extractPages(bytes, extension));
+    if (!hasReadableText(pages)) return processingFailed("No readable text found", "no_text");
+    const chunks = chunkPages(pages);
+    if (chunks.length > MAX_CHUNKS_PER_FILE) {
+      return processingFailed(`${chunks.length} passages; the limit is ${MAX_CHUNKS_PER_FILE}`, "too_much_text");
     }
 
-    // Look the document up by our own ID rather than the returned name.
-    document ??= await step("Find imported document", () =>
-      findDocumentByAppFileId(storeName, appFileId),
-    );
-    if (!document) return processingFailed("Imported document not found in the Gemini store");
-    const file = toFileItem(document, false);
-    if (!file) return processingFailed(`Gemini document not usable (state ${document.state ?? "unknown"})`);
+    chunksWritten = true;
+    await step("Index passages", () => upsertChunks(appFileId, fileName, chunks));
+    const indexed = await step("Wait for indexing", () => waitForIndexing(deadline));
+    if (!indexed) return Response.json({ error: "timeout" }, { status: 504 });
 
-    if (replaceDocumentName && isDocumentOfStore(replaceDocumentName, storeName)) {
-      try {
-        await ai.fileSearchStores.documents.delete({
-          name: replaceDocumentName,
-          config: { force: true },
-        });
-      } catch (error) {
-        logError("ingest-replace-delete", error);
-      }
+    const file: FileItem = {
+      appFileId,
+      name: fileName,
+      extension,
+      sizeBytes: bytes.byteLength,
+      uploadedAt: Math.floor(Date.now() / 1000),
+      status: "ready",
+    };
+    await step("Save file record", () => saveFileRecord(file, chunks.length));
+    succeeded = true;
+
+    if (replaceAppFileId && replaceAppFileId !== appFileId) {
+      await deleteFile(replaceAppFileId).catch((error) => logError("ingest-replace-delete", error));
     }
-
     return Response.json({ file });
   } catch (error) {
     logError("ingest", error);
     return processingFailed(describeError(error));
   } finally {
+    // Never leave half-indexed passages behind.
+    if (chunksWritten && !succeeded && isUuid(appFileId)) {
+      await deleteChunks(appFileId).catch((error) => logError("ingest-cleanup", error));
+    }
     await del(blobUrl).catch((error) => logError("ingest-blob-delete", error));
   }
 }

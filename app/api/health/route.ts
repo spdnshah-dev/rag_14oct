@@ -1,35 +1,45 @@
 import { issueSignedToken } from "@vercel/blob";
-import { describeError, findStoreName, gemini, logError, modelName } from "@/lib/gemini";
+import { describeError, logError } from "@/lib/errors";
+import { checkModel, modelName } from "@/lib/llm";
+import { indexInfo } from "@/lib/vector";
 
 export const runtime = "nodejs";
 
-// Checks the env vars right after a deploy. "store: false" with ok: true
-// means no file has been uploaded yet, so the Gemini store does not exist.
-// "blob" checks that the Blob store credentials can sign an upload URL.
+// Checks each service right after a deploy: Groq (key and model), the
+// Upstash Vector index (and its embedding models), and Blob credentials.
 export async function GET() {
   const model = modelName();
-  let geminiError: string | undefined;
-  let store = false;
+  const errors: Record<string, string> = {};
+
   try {
-    const storeName = await findStoreName();
-    if (storeName) await gemini().fileSearchStores.get({ name: storeName });
-    store = Boolean(storeName);
+    await checkModel();
   } catch (error) {
-    logError("health-gemini", error);
-    geminiError = describeError(error);
+    logError("health-groq", error);
+    errors.groq = describeError(error);
   }
 
-  let blobError: string | undefined;
+  let search: { hybrid: boolean; denseModel?: string; sparseModel?: string } | undefined;
+  try {
+    const info = await indexInfo();
+    const denseModel = info.denseIndex?.embeddingModel;
+    const sparseModel = info.sparseIndex?.embeddingModel;
+    search = { hybrid: Boolean(denseModel && sparseModel), denseModel, sparseModel };
+    if (!denseModel && !sparseModel) {
+      errors.vector =
+        "The Upstash index has no built-in embedding model. Create it with an Upstash embedding model.";
+    }
+  } catch (error) {
+    logError("health-vector", error);
+    errors.vector = describeError(error);
+  }
+
   try {
     await issueSignedToken({ pathname: "uploads/health-check.txt", operations: ["put"] });
   } catch (error) {
     logError("health-blob", error);
-    blobError = describeError(error);
+    errors.blob = describeError(error);
   }
 
-  const ok = !geminiError && !blobError;
-  return Response.json(
-    { ok, store, model, blob: !blobError, geminiError, blobError },
-    { status: ok ? 200 : 500 },
-  );
+  const ok = Object.keys(errors).length === 0;
+  return Response.json({ ok, model, search, errors }, { status: ok ? 200 : 500 });
 }
